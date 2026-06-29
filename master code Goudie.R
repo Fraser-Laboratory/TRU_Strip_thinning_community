@@ -245,122 +245,154 @@ n_distinct(final_table$sample_id)
 ################################################## Beta diversity #################################################
 
 
-## ---------------------------------------------------------------
-## BLOCK A1 — Prepare metadata and community matrices
-## ---------------------------------------------------------------
 
-env_cols <- c("block", "year", "trt", "distance", "elevation", "slope", "orientation")
 
-metadata <- final_table %>%
-  select(all_of(env_cols)) %>%
-  mutate(
+
+############################################################
+##   metadata and community matrix
+
+
+env_cols <- c(
+  "block", "year", "trt", "distance", "elevation",
+  "slope", "orientation", "label", "sampling"
+)
+
+env_cols <- intersect(env_cols, names(vegetation_data))
+
+metadata <- vegetation_data %>%
+  dplyr::select(dplyr::all_of(env_cols)) %>%
+  dplyr::mutate(
     block       = factor(block),
     year        = factor(year, levels = c("2018", "2019", "2020")),
     trt         = factor(trt),
-    orientation = factor(orientation)
+    orientation = factor(orientation),
+    label       = factor(label),
+    sampling    = factor(sampling)
   )
 
-str(metadata)
+species_cols <- setdiff(names(vegetation_data), env_cols)
 
-species_cols <- setdiff(names(final_table), env_cols)
-
-comm_cover <- final_table %>%
-  select(all_of(species_cols))
+comm_cover <- vegetation_data %>%
+  dplyr::select(dplyr::all_of(species_cols))
 
 comm_pa <- comm_cover %>%
-  mutate(across(everything(), ~ ifelse(.x > 0, 1, 0)))
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::everything(),
+      ~ ifelse(.x > 0, 1, 0)
+    )
+  )
 
-comm_pa <- comm_pa[, colSums(comm_pa) > 0]
+comm_pa <- comm_pa[, colSums(comm_pa, na.rm = TRUE) > 0, drop = FALSE]
 
 dim(comm_pa)
 head(comm_pa[, 1:10])
 
 
-## ---------------------------------------------------------------
-## BLOCK A2 — Jaccard partitioning with betapart
-## ---------------------------------------------------------------
+## Jaccard beta-diversity partitioning
 
-beta_jac <- betapart::beta.pair(comm_pa, index.family = "jaccard")
+
+beta_jac <- betapart::beta.pair(
+  comm_pa,
+  index.family = "jaccard"
+)
 
 jac_total    <- beta_jac$beta.jac
 jac_turnover <- beta_jac$beta.jtu
 jac_nested   <- beta_jac$beta.jne
 
-mean(jac_turnover)
-mean(jac_nested)
-mean(jac_total)
-
-
-## ---------------------------------------------------------------
-## BLOCK A3 — Figure 2A: Turnover vs nestedness
-## ---------------------------------------------------------------
-
-turn_vals <- as.numeric(jac_turnover)
-nest_vals <- as.numeric(jac_nested)
-
-beta_box <- tibble(
-  component = c(
-    rep("Nestedness", length(nest_vals)),
-    rep("Turnover", length(turn_vals))
-  ),
-  value = c(nest_vals, turn_vals)
-) %>%
-  drop_na()
-
-light_grey <- "#d9d9d9"
-dark_grey  <- "#4d4d4d"
-
-fig2A <- ggplot(beta_box, aes(x = component, y = value, fill = component)) +
-  geom_boxplot(outlier.size = 0.6, color = "black", width = 0.6) +
-  scale_fill_manual(values = c(
-    "Nestedness" = light_grey,
-    "Turnover"   = dark_grey
-  )) +
-  scale_y_continuous(limits = c(0, 1), expand = c(0, 0)) +
-  labs(x = NULL, y = NULL) +
-  theme_classic() +
-  theme(
-    axis.text.x = element_text(family = "Times New Roman", size = 16, color = "black"),
-    axis.text.y = element_text(family = "Times New Roman", size = 16, color = "black"),
-    legend.position = "none"
+mean_jaccard <- data.frame(
+  component = c("Total Jaccard", "Turnover", "Nestedness"),
+  mean_value = c(
+    mean(jac_total, na.rm = TRUE),
+    mean(jac_turnover, na.rm = TRUE),
+    mean(jac_nested, na.rm = TRUE)
   )
+)
 
-fig2A
+mean_jaccard
 
 
-## ---------------------------------------------------------------
-## BLOCK A4 — PERMANOVA on Jaccard turnover
-## ---------------------------------------------------------------
+############################################################
+## 4. Full PERMANOVA on Jaccard turnover
+############################################################
 
 set.seed(123)
 
 permanova_turnover <- vegan::adonis2(
   jac_turnover ~ year + trt + distance + elevation + slope + orientation,
-  data   = metadata,
-  strata = metadata$block
+  data = metadata,
+  strata = metadata$block,
+  permutations = 999
 )
 
 permanova_turnover
 
 
-## ---------------------------------------------------------------
-## BLOCK A5 — Pairwise PERMANOVA: turnover by year
-## ---------------------------------------------------------------
+############################################################
+## 5. Table 1: Full PERMANOVA table
+############################################################
+
+table1_permanova <- as.data.frame(permanova_turnover) %>%
+  tibble::rownames_to_column("Factor") %>%
+  dplyr::rename(
+    df = Df,
+    R2 = R2,
+    F_value = F,
+    p_value = `Pr(>F)`
+  ) %>%
+  dplyr::mutate(
+    Factor = dplyr::recode(
+      Factor,
+      "year" = "Year",
+      "trt" = "Thinning",
+      "distance" = "Distance",
+      "elevation" = "Elevation",
+      "slope" = "Slope",
+      "orientation" = "Orientation",
+      "Residual" = "Residual",
+      "Total" = "Total"
+    ),
+    p_label = dplyr::case_when(
+      is.na(p_value) ~ "",
+      p_value < 0.001 ~ "<0.001",
+      TRUE ~ as.character(round(p_value, 3))
+    ),
+    sig = dplyr::case_when(
+      is.na(p_value) ~ "",
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+table1_permanova
+
+
+############################################################
+## 6. Pairwise PERMANOVA by year
+############################################################
 
 run_pairwise_year_permanova <- function(year1, year2, metadata, comm_pa) {
   
   keep_rows <- metadata$year %in% c(year1, year2)
   
-  meta_sub <- metadata[keep_rows, , drop = FALSE]
+  meta_sub <- droplevels(metadata[keep_rows, , drop = FALSE])
   comm_sub <- comm_pa[keep_rows, , drop = FALSE]
   
-  beta_sub <- betapart::beta.pair(comm_sub, index.family = "jaccard")
-  jac_sub  <- beta_sub$beta.jtu
+  beta_sub <- betapart::beta.pair(
+    comm_sub,
+    index.family = "jaccard"
+  )
+  
+  jac_sub <- beta_sub$beta.jtu
   
   res <- vegan::adonis2(
     jac_sub ~ year,
-    data   = meta_sub,
-    strata = meta_sub$block
+    data = meta_sub,
+    strata = meta_sub$block,
+    permutations = 999
   )
   
   list(
@@ -369,25 +401,69 @@ run_pairwise_year_permanova <- function(year1, year2, metadata, comm_pa) {
   )
 }
 
+set.seed(123)
+
 pair_2018_2019 <- run_pairwise_year_permanova("2018", "2019", metadata, comm_pa)
-pair_2019_2020 <- run_pairwise_year_permanova("2019", "2020", metadata, comm_pa)
 pair_2018_2020 <- run_pairwise_year_permanova("2018", "2020", metadata, comm_pa)
+pair_2019_2020 <- run_pairwise_year_permanova("2019", "2020", metadata, comm_pa)
 
 pair_2018_2019$permanova
-pair_2019_2020$permanova
 pair_2018_2020$permanova
+pair_2019_2020$permanova
 
 
-## ---------------------------------------------------------------
-## BLOCK A6 — Bootstrap SE of pairwise R2 values
-## ---------------------------------------------------------------
+############################################################
+## 7. Table 2: Pairwise PERMANOVA table
+############################################################
+
+extract_pairwise <- function(pair_object) {
+  
+  x <- as.data.frame(pair_object$permanova)
+  
+  data.frame(
+    Comparison = pair_object$years,
+    R2 = x$R2[1],
+    F_value = x$F[1],
+    p_value = x$`Pr(>F)`[1]
+  )
+}
+
+table2_pairwise_permanova <- dplyr::bind_rows(
+  extract_pairwise(pair_2018_2019),
+  extract_pairwise(pair_2019_2020),
+  extract_pairwise(pair_2018_2020)
+) %>%
+  dplyr::mutate(
+    Comparison = factor(
+      Comparison,
+      levels = c("2018 vs 2019", "2019 vs 2020", "2018 vs 2020")
+    ),
+    p_label = dplyr::case_when(
+      p_value < 0.001 ~ "<0.001",
+      TRUE ~ as.character(round(p_value, 3))
+    ),
+    sig = dplyr::case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  ) %>%
+  dplyr::arrange(Comparison)
+
+table2_pairwise_permanova
+
+
+############################################################
+## 8. Bootstrap SE for pairwise R2
+############################################################
 
 boot_R2_pair <- function(year1, year2, metadata, comm_pa, n_boot = 199) {
   
-  keep <- metadata$year %in% c(year1, year2)
+  keep_rows <- metadata$year %in% c(year1, year2)
   
-  meta0 <- droplevels(metadata[keep, ])
-  comm0 <- comm_pa[keep, , drop = FALSE]
+  meta0 <- droplevels(metadata[keep_rows, , drop = FALSE])
+  comm0 <- comm_pa[keep_rows, , drop = FALSE]
   
   idx1 <- which(meta0$year == year1)
   idx2 <- which(meta0$year == year2)
@@ -401,16 +477,20 @@ boot_R2_pair <- function(year1, year2, metadata, comm_pa, n_boot = 199) {
       sample(idx2, length(idx2), replace = TRUE)
     )
     
-    meta_b <- meta0[idx, , drop = FALSE]
+    meta_b <- droplevels(meta0[idx, , drop = FALSE])
     comm_b <- comm0[idx, , drop = FALSE]
     
-    beta_b <- betapart::beta.pair(comm_b, index.family = "jaccard")
-    jac_b  <- beta_b$beta.jtu
+    beta_b <- betapart::beta.pair(
+      comm_b,
+      index.family = "jaccard"
+    )
+    
+    jac_b <- beta_b$beta.jtu
     
     ad_b <- vegan::adonis2(
       jac_b ~ year,
-      data         = meta_b,
-      strata       = meta_b$block,
+      data = meta_b,
+      strata = meta_b$block,
       permutations = 0
     )
     
@@ -422,34 +502,107 @@ boot_R2_pair <- function(year1, year2, metadata, comm_pa, n_boot = 199) {
 }
 
 
-## ---------------------------------------------------------------
-## BLOCK A7 — Figure 2B: Pairwise PERMANOVA R2
-## ---------------------------------------------------------------
+############################################################
+## 9. Data for Figure 2A: nestedness vs turnover
+############################################################
+
+turn_vals <- as.numeric(jac_turnover)
+nest_vals <- as.numeric(jac_nested)
+
+beta_box <- tibble::tibble(
+  component = c(
+    rep("Nestedness", length(nest_vals)),
+    rep("Turnover", length(turn_vals))
+  ),
+  value = c(nest_vals, turn_vals)
+) %>%
+  tidyr::drop_na() %>%
+  dplyr::mutate(
+    component = factor(component, levels = c("Nestedness", "Turnover"))
+  )
+
+
+############################################################
+## 10. Figure 2A: nestedness vs turnover
+############################################################
+
+
+fig2A <- ggplot(beta_box, aes(x = component, y = value, fill = component)) +
+  geom_boxplot(
+    outlier.size = 0.6,
+    color = "black",
+    width = 0.6
+  ) +
+  annotate(
+    "text",
+    x = 0.58,
+    y = 0.95,
+    label = "(A)",
+    family = "Times New Roman",
+    fontface = "bold",
+    size = 5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Nestedness" = "#d9d9d9",
+      "Turnover" = "#4d4d4d"
+    )
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.25),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Jaccard β-component",
+    y = "Jaccard dissimilarity β"
+  ) +
+  theme_classic(base_family = "Times New Roman") +
+  theme(
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.title.x = element_text(size = 16, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 16, color = "black", face = "bold"),
+    legend.position = "none",
+    plot.margin = margin(5.5, 22, 5.5, 5.5)
+  )
+
+fig2A
+
+############################################################
+## 11. Data for Figure 2B: pairwise PERMANOVA R2
+############################################################
 
 set.seed(123)
 
-pairwise_R2 <- tibble(
-  comparison = factor(
-    c("2018 vs 2019", "2018 vs 2020", "2019 vs 2020"),
-    levels = c("2018 vs 2019", "2018 vs 2020", "2019 vs 2020")
-  ),
-  R2_percent = c(
-    pair_2018_2019$permanova$R2[1],
-    pair_2018_2020$permanova$R2[1],
-    pair_2019_2020$permanova$R2[1]
-  ) * 100,
-  SE_percent = c(
-    boot_R2_pair("2018", "2019", metadata, comm_pa),
-    boot_R2_pair("2018", "2020", metadata, comm_pa),
-    boot_R2_pair("2019", "2020", metadata, comm_pa)
+pairwise_R2 <- table2_pairwise_permanova %>%
+  dplyr::mutate(
+    comparison = factor(
+      as.character(Comparison),
+      levels = c("2018 vs 2019", "2018 vs 2020", "2019 vs 2020")
+    ),
+    R2_percent = R2 * 100,
+    SE_percent = c(
+      boot_R2_pair("2018", "2019", metadata, comm_pa),
+      boot_R2_pair("2018", "2020", metadata, comm_pa),
+      boot_R2_pair("2019", "2020", metadata, comm_pa)
+    ),
+    fill_col = c("#4d4d4d", "#8c8c8c", "#d9d9d9"),
+    star_y = R2_percent + SE_percent + 0.8
   )
-) %>%
-  mutate(fill_col = c("#4d4d4d", "#8c8c8c", "#d9d9d9"))
 
 pairwise_R2
 
+
+############################################################
+## 12. Figure 2B: pairwise PERMANOVA R2
+############################################################
+
 fig2B <- ggplot(pairwise_R2, aes(x = comparison, y = R2_percent, fill = fill_col)) +
-  geom_col(color = "black", width = 0.6) +
+  geom_col(
+    color = "black",
+    width = 0.6
+  ) +
   geom_errorbar(
     aes(
       ymin = R2_percent - SE_percent,
@@ -458,47 +611,74 @@ fig2B <- ggplot(pairwise_R2, aes(x = comparison, y = R2_percent, fill = fill_col
     width = 0.15,
     linewidth = 0.7
   ) +
+  geom_text(
+    aes(y = star_y, label = sig),
+    family = "Times New Roman",
+    fontface = "bold",
+    size = 5
+  ) +
+  annotate(
+    "text",
+    x = 0.70,
+    y = 19.0,
+    label = "(B)",
+    family = "Times New Roman",
+    fontface = "bold",
+    size = 5
+  ) +
   scale_fill_identity() +
-  scale_y_continuous(limits = c(0, 20), expand = c(0, 0)) +
-  labs(x = NULL, y = NULL) +
-  theme_classic() +
+  scale_y_continuous(
+    limits = c(0, 20),
+    breaks = seq(0, 20, by = 5),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Year comparison",
+    y = "Turnover variance explained (R², %)"
+  ) +
+  theme_classic(base_family = "Times New Roman") +
   theme(
-    axis.text.x = element_text(family = "Times New Roman", size = 16, color = "black"),
-    axis.text.y = element_text(family = "Times New Roman", size = 16, color = "black"),
-    legend.position = "none"
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.title.x = element_text(size = 16, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 16, color = "black", face = "bold"),
+    legend.position = "none",
+    plot.margin = margin(5.5, 5.5, 5.5, 22)
   )
 
 fig2B
 
+############################################################
+## 13. Combine Figure 2 with patchwork
+############################################################
 
-## ---------------------------------------------------------------
-## BLOCK A8 — Save figures
-## ---------------------------------------------------------------
+fig2 <- fig2A + fig2B +
+  patchwork::plot_layout(ncol = 2)
+
+fig2
+
+
+############################################################
+## 14. Save outputs
+############################################################
+
+
 
 ggsave(
-  filename = "Fig2A_boxplot.png",
-  plot = fig2A,
-  path = "C:/Users/Research Greenhouse/Desktop/paper goudie/goudie2/data",
-  width = 6,
-  height = 5,
-  dpi = 600
+  filename = "Figure2_beta_diversity.tiff",
+  plot = fig2,
+  dpi = 600,
+  width = 10,
+  height = 4.5,
+  units = "in",
+  compression = "lzw"
 )
-
-ggsave(
-  filename = "Fig2B_clean.png",
-  plot = fig2B,
-  path = "C:/Users/Research Greenhouse/Desktop/paper goudie/goudie2/data",
-  width = 7,
-  height = 5,
-  dpi = 600
-)
-
 
 ################################ Core vs transient richness ################################
 
-library(tidyverse)
-
-## 1. Define metadata and species columns
+############################################################
+##  Define metadata and species columns
+############################################################
 
 env_cols <- c(
   "block", "year", "trt", "distance",
@@ -506,50 +686,72 @@ env_cols <- c(
   "label", "sampling"
 )
 
-env_cols <- intersect(env_cols, names(final_div_table1))
+env_cols <- intersect(env_cols, names(vegetation_data))
 
-species_cols <- setdiff(names(final_div_table1), env_cols)
+species_cols <- setdiff(names(vegetation_data), env_cols)
 
 
+############################################################
 ## 2. Convert species cover to presence-absence
+############################################################
 
-comm_pa <- final_div_table1 %>%
-  select(all_of(species_cols)) %>%
-  mutate(across(everything(), ~ ifelse(.x > 0, 1, 0)))
+comm_pa_core <- vegetation_data %>%
+  dplyr::select(dplyr::all_of(species_cols)) %>%
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::everything(),
+      ~ ifelse(.x > 0, 1, 0)
+    )
+  )
 
-comm_pa <- comm_pa[, colSums(comm_pa, na.rm = TRUE) > 0, drop = FALSE]
+comm_pa_core <- comm_pa_core[
+  ,
+  colSums(comm_pa_core, na.rm = TRUE) > 0,
+  drop = FALSE
+]
 
-species_pa <- colnames(comm_pa)
+species_pa <- colnames(comm_pa_core)
 
 
+############################################################
 ## 3. Calculate species temporal occupancy across years
+############################################################
 
-df_pa <- bind_cols(
-  final_div_table1 %>% select(any_of(c("year", "label"))),
-  comm_pa
+df_pa <- dplyr::bind_cols(
+  vegetation_data %>%
+    dplyr::select(dplyr::any_of(c("year", "label", "sampling"))),
+  comm_pa_core
 )
 
 species_occupancy <- df_pa %>%
-  group_by(year) %>%
-  summarise(
-    across(all_of(species_pa), ~ max(.x, na.rm = TRUE)),
+  dplyr::group_by(year) %>%
+  dplyr::summarise(
+    dplyr::across(
+      dplyr::all_of(species_pa),
+      ~ max(.x, na.rm = TRUE)
+    ),
     .groups = "drop"
   ) %>%
-  summarise(
-    across(all_of(species_pa), ~ sum(.x, na.rm = TRUE))
+  dplyr::summarise(
+    dplyr::across(
+      dplyr::all_of(species_pa),
+      ~ sum(.x, na.rm = TRUE)
+    )
   ) %>%
-  pivot_longer(
-    cols = everything(),
+  tidyr::pivot_longer(
+    cols = dplyr::everything(),
     names_to = "species",
     values_to = "n_years"
   )
 
 
-## 4. Classify species: core vs transient only
+############################################################
+## 4. Classify species as core or transient
+############################################################
 
 species_class <- species_occupancy %>%
-  mutate(
-    class = case_when(
+  dplyr::mutate(
+    class = dplyr::case_when(
       n_years >= 2 ~ "core",
       n_years == 1 ~ "transient",
       TRUE ~ NA_character_
@@ -559,32 +761,42 @@ species_class <- species_occupancy %>%
 table(species_class$class)
 
 
+############################################################
 ## 5. Define core and transient species lists
+############################################################
 
 core_species <- species_class %>%
-  filter(class == "core") %>%
-  pull(species)
+  dplyr::filter(class == "core") %>%
+  dplyr::pull(species)
 
 transient_species <- species_class %>%
-  filter(class == "transient") %>%
-  pull(species)
+  dplyr::filter(class == "transient") %>%
+  dplyr::pull(species)
 
 
-## 6. Create richness_df
+############################################################
+## 6. Create quadrat-level richness table
+############################################################
 
-richness_df <- final_div_table1 %>%
-  mutate(
-    total_richness = rowSums(comm_pa, na.rm = TRUE),
-    core_richness = rowSums(comm_pa[, core_species, drop = FALSE], na.rm = TRUE),
-    transient_richness = rowSums(comm_pa[, transient_species, drop = FALSE], na.rm = TRUE),
-    transient_prop = ifelse(
+richness_df <- vegetation_data %>%
+  dplyr::mutate(
+    total_richness = rowSums(comm_pa_core, na.rm = TRUE),
+    core_richness = rowSums(
+      comm_pa_core[, core_species, drop = FALSE],
+      na.rm = TRUE
+    ),
+    transient_richness = rowSums(
+      comm_pa_core[, transient_species, drop = FALSE],
+      na.rm = TRUE
+    ),
+    transient_prop = dplyr::if_else(
       total_richness > 0,
       transient_richness / total_richness,
-      NA
+      NA_real_
     )
   ) %>%
-  select(
-    any_of(c(
+  dplyr::select(
+    dplyr::any_of(c(
       "block", "label", "sampling", "year", "trt",
       "distance", "elevation", "slope", "orientation"
     )),
@@ -595,7 +807,9 @@ richness_df <- final_div_table1 %>%
   )
 
 
-## 7. Check outputs
+############################################################
+## 7. Check richness outputs
+############################################################
 
 head(species_class)
 head(richness_df)
@@ -605,15 +819,13 @@ summary(richness_df$core_richness)
 summary(richness_df$transient_richness)
 summary(richness_df$transient_prop)
 
-################################ stats Core vs transient  ################################
 
-
-## ---------------------------------------------------------------
-## 1. Prepare data
-## ---------------------------------------------------------------
+############################################################
+## 8. Prepare richness data for models
+############################################################
 
 richness_df2 <- richness_df %>%
-  mutate(
+  dplyr::mutate(
     block = factor(block),
     year = factor(year, levels = c("2018", "2019", "2020")),
     trt = factor(trt, levels = c("Control", "10 m", "15 m", "20 m")),
@@ -621,9 +833,9 @@ richness_df2 <- richness_df %>%
   )
 
 
-## ---------------------------------------------------------------
-## 2. Fit final models
-## ---------------------------------------------------------------
+############################################################
+## 9. Fit final richness models
+############################################################
 
 mod_total <- glmmTMB(
   total_richness ~ year * trt + (1 | block),
@@ -650,9 +862,9 @@ mod_transient_prop <- glmmTMB(
 )
 
 
-## ---------------------------------------------------------------
-## 3. Type II Wald tests
-## ---------------------------------------------------------------
+############################################################
+## 10. Type II Wald tests
+############################################################
 
 anova_total <- car::Anova(mod_total, type = 2)
 anova_core <- car::Anova(mod_core, type = 2)
@@ -665,20 +877,64 @@ anova_transient
 anova_transient_prop
 
 
+############################################################
+## 11. Table 3: richness model summary table
+############################################################
+
+extract_richness_anova <- function(anova_object, response_name) {
+  
+  anova_df <- as.data.frame(anova_object) %>%
+    tibble::rownames_to_column("Effect")
+  
+  p_col <- grep("Pr\\(", names(anova_df), value = TRUE)
+  
+  anova_df %>%
+    dplyr::transmute(
+      Response = response_name,
+      Effect = dplyr::recode(
+        Effect,
+        "year" = "Year",
+        "trt" = "Thinning",
+        "year:trt" = "Year × Thinning"
+      ),
+      Chisq = Chisq,
+      df = Df,
+      p_value = .data[[p_col]],
+      p_label = dplyr::case_when(
+        p_value < 0.001 ~ "<0.001",
+        TRUE ~ as.character(round(p_value, 3))
+      ),
+      sig = dplyr::case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01 ~ "**",
+        p_value < 0.05 ~ "*",
+        TRUE ~ "ns"
+      )
+    )
+}
+
+table3_richness <- dplyr::bind_rows(
+  extract_richness_anova(anova_total, "Total richness"),
+  extract_richness_anova(anova_core, "Core richness"),
+  extract_richness_anova(anova_transient, "Transient richness"),
+  extract_richness_anova(anova_transient_prop, "Transient proportion")
+)
+
+table3_richness
 
 
-## ---------------------------------------------------------------
-## 4. DHARMa diagnostic table
-## ---------------------------------------------------------------
+############################################################
+## 12. DHARMa diagnostic table
+############################################################
 
 get_dharma_tests <- function(model, model_name) {
   
-  sim <- simulateResiduals(model)
+  sim <- DHARMa::simulateResiduals(model)
   
-  disp <- testDispersion(sim)
-  zi <- testZeroInflation(sim)
+  disp <- DHARMa::testDispersion(sim)
+  zi <- DHARMa::testZeroInflation(sim)
   
-  tibble(
+  tibble::tibble(
     model = model_name,
     dispersion_statistic = as.numeric(disp$statistic),
     dispersion_p = disp$p.value,
@@ -687,7 +943,7 @@ get_dharma_tests <- function(model, model_name) {
   )
 }
 
-dharma_table <- bind_rows(
+dharma_table <- dplyr::bind_rows(
   get_dharma_tests(mod_total, "Total richness"),
   get_dharma_tests(mod_core, "Core richness"),
   get_dharma_tests(mod_transient, "Transient richness"),
@@ -698,128 +954,87 @@ dharma_table
 
 
 
+
 ################################ Figure 3 plotting ################################
 
+############################################################
+## Figure 3: Core and transient richness structure
+## Input object: richness_df
+## Output: fig3
+############################################################
 
 
-
-##  data preparation
-
+############################################################
+## 1. Prepare data
+############################################################
 
 richness_df2 <- richness_df %>%
-  mutate(
+  dplyr::mutate(
     block = factor(block),
     year = factor(year, levels = c("2018", "2019", "2020")),
     trt = factor(trt, levels = c("10 m", "15 m", "20 m", "Control")),
     orientation = factor(orientation)
   )
 
+
+############################################################
+## 2. Summary by year
+############################################################
+
 summary_year <- richness_df2 %>%
-  group_by(year) %>%
-  summarise(
+  dplyr::group_by(year) %>%
+  dplyr::summarise(
     total_mean = mean(total_richness, na.rm = TRUE),
-    total_se   = sd(total_richness, na.rm = TRUE) / sqrt(n()),
-    core_mean  = mean(core_richness, na.rm = TRUE),
-    core_se    = sd(core_richness, na.rm = TRUE) / sqrt(n()),
+    total_se   = sd(total_richness, na.rm = TRUE) / sqrt(dplyr::n()),
+    
+    core_mean = mean(core_richness, na.rm = TRUE),
+    core_se   = sd(core_richness, na.rm = TRUE) / sqrt(dplyr::n()),
+    
     trans_mean = mean(transient_richness, na.rm = TRUE),
-    trans_se   = sd(transient_richness, na.rm = TRUE) / sqrt(n()),
-    prop_mean  = mean(transient_prop, na.rm = TRUE),
-    prop_se    = sd(transient_prop, na.rm = TRUE) / sqrt(n()),
+    trans_se   = sd(transient_richness, na.rm = TRUE) / sqrt(dplyr::n()),
+    
+    prop_mean = mean(transient_prop, na.rm = TRUE),
+    prop_se   = sd(transient_prop, na.rm = TRUE) / sqrt(dplyr::n()),
+    
     .groups = "drop"
   )
+
+
+############################################################
+## 3. Summary by thinning treatment
+############################################################
 
 summary_trt <- richness_df2 %>%
-  group_by(trt) %>%
-  summarise(
+  dplyr::group_by(trt) %>%
+  dplyr::summarise(
     total_mean = mean(total_richness, na.rm = TRUE),
-    total_se   = sd(total_richness, na.rm = TRUE) / sqrt(n()),
-    core_mean  = mean(core_richness, na.rm = TRUE) / sqrt(1) * 0 + mean(core_richness, na.rm = TRUE), # keep style simple
-    core_se    = sd(core_richness, na.rm = TRUE) / sqrt(n()),
+    total_se   = sd(total_richness, na.rm = TRUE) / sqrt(dplyr::n()),
+    
+    core_mean = mean(core_richness, na.rm = TRUE),
+    core_se   = sd(core_richness, na.rm = TRUE) / sqrt(dplyr::n()),
+    
     trans_mean = mean(transient_richness, na.rm = TRUE),
-    trans_se   = sd(transient_richness, na.rm = TRUE) / sqrt(n()),
-    prop_mean  = mean(transient_prop, na.rm = TRUE),
-    prop_se    = sd(transient_prop, na.rm = TRUE) / sqrt(n()),
+    trans_se   = sd(transient_richness, na.rm = TRUE) / sqrt(dplyr::n()),
+    
+    prop_mean = mean(transient_prop, na.rm = TRUE),
+    prop_se   = sd(transient_prop, na.rm = TRUE) / sqrt(dplyr::n()),
+    
     .groups = "drop"
   )
 
 
-summary_trt <- richness_df2 %>%
-  group_by(trt) %>%
-  summarise(
-    total_mean = mean(total_richness, na.rm = TRUE),
-    total_se   = sd(total_richness, na.rm = TRUE) / sqrt(n()),
-    core_mean  = mean(core_richness, na.rm = TRUE),
-    core_se    = sd(core_richness, na.rm = TRUE) / sqrt(n()),
-    trans_mean = mean(transient_richness, na.rm = TRUE),
-    trans_se   = sd(transient_richness, na.rm = TRUE) / sqrt(n()),
-    prop_mean  = mean(transient_prop, na.rm = TRUE),
-    prop_se    = sd(transient_prop, na.rm = TRUE) / sqrt(n()),
-    .groups = "drop"
-  )
-
-
-## Panel A data
-
+############################################################
+## 4. Panel data
+############################################################
 
 panel_A_data <- summary_year %>%
-  select(year, total_mean, total_se, core_mean, core_se) %>%
-  pivot_longer(
+  dplyr::select(year, total_mean, total_se, core_mean, core_se) %>%
+  tidyr::pivot_longer(
     cols = -year,
     names_to = c("metric", ".value"),
     names_pattern = "(total|core)_(mean|se)"
   ) %>%
-  mutate(
-    metric = factor(
-      metric,
-      levels = c("total", "core", "trans", "prop"),
-      labels = c("Total richness (S')", "Core richness",
-                 "Transient richness", "Transient proportion")
-    )
-  )
-
-## add dummy rows so panel A legend shows all 4 series
-panel_A_dummy <- tibble(
-  year = factor(c("2018", "2018"), levels = c("2018", "2019", "2020")),
-  metric = factor(c("Transient richness", "Transient proportion"),
-                  levels = c("Total richness (S')", "Core richness",
-                             "Transient richness", "Transient proportion")),
-  mean = NA_real_,
-  se = NA_real_
-)
-
-panel_A_data <- bind_rows(panel_A_data, panel_A_dummy)
-
-
-## Panel B data
-
-
-panel_B_data <- summary_year %>%
-  select(year, trans_mean, trans_se, prop_mean, prop_se) %>%
-  pivot_longer(
-    cols = -year,
-    names_to = c("metric", ".value"),
-    names_pattern = "(trans|prop)_(mean|se)"
-  ) %>%
-  mutate(
-    metric = factor(
-      metric,
-      levels = c("trans", "prop"),
-      labels = c("Transient richness", "Transient proportion")
-    )
-  )
-
-
-## Panel C data
-
-
-panel_C_data <- summary_trt %>%
-  select(trt, total_mean, total_se, core_mean, core_se) %>%
-  pivot_longer(
-    cols = -trt,
-    names_to = c("metric", ".value"),
-    names_pattern = "(total|core)_(mean|se)"
-  ) %>%
-  mutate(
+  dplyr::mutate(
     metric = factor(
       metric,
       levels = c("total", "core"),
@@ -827,18 +1042,44 @@ panel_C_data <- summary_trt %>%
     )
   )
 
+panel_B_data <- summary_year %>%
+  dplyr::select(year, trans_mean, trans_se, prop_mean, prop_se) %>%
+  tidyr::pivot_longer(
+    cols = -year,
+    names_to = c("metric", ".value"),
+    names_pattern = "(trans|prop)_(mean|se)"
+  ) %>%
+  dplyr::mutate(
+    metric = factor(
+      metric,
+      levels = c("trans", "prop"),
+      labels = c("Transient richness", "Transient proportion")
+    )
+  )
 
-## Panel D data
-
+panel_C_data <- summary_trt %>%
+  dplyr::select(trt, total_mean, total_se, core_mean, core_se) %>%
+  tidyr::pivot_longer(
+    cols = -trt,
+    names_to = c("metric", ".value"),
+    names_pattern = "(total|core)_(mean|se)"
+  ) %>%
+  dplyr::mutate(
+    metric = factor(
+      metric,
+      levels = c("total", "core"),
+      labels = c("Total richness (S')", "Core richness")
+    )
+  )
 
 panel_D_data <- summary_trt %>%
-  select(trt, trans_mean, trans_se, prop_mean, prop_se) %>%
-  pivot_longer(
+  dplyr::select(trt, trans_mean, trans_se, prop_mean, prop_se) %>%
+  tidyr::pivot_longer(
     cols = -trt,
     names_to = c("metric", ".value"),
     names_pattern = "(trans|prop)_(mean|se)"
   ) %>%
-  mutate(
+  dplyr::mutate(
     metric = factor(
       metric,
       levels = c("trans", "prop"),
@@ -847,6 +1088,9 @@ panel_D_data <- summary_trt %>%
   )
 
 
+############################################################
+## 5. Colours
+############################################################
 
 metric_cols <- c(
   "Total richness (S')" = "black",
@@ -856,117 +1100,322 @@ metric_cols <- c(
 )
 
 
-## Panel A plot
+############################################################
+## 6. Common theme
+############################################################
 
+theme_fig3 <- theme_classic(base_family = "Times New Roman") +
+  theme(
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.title.x = element_text(size = 16, color = "black", face = "bold"),
+    axis.title.y = element_text(size = 16, color = "black", face = "bold"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA)
+  )
+
+
+############################################################
+## 7. Panel A
+############################################################
+
+
+panel_A_data <- summary_year %>%
+  dplyr::select(year, total_mean, total_se, core_mean, core_se) %>%
+  tidyr::pivot_longer(
+    cols = -year,
+    names_to = c("metric", ".value"),
+    names_pattern = "(total|core)_(mean|se)"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(
+      metric,
+      total = "Total richness (S')",
+      core = "Core richness"
+    ),
+    metric = factor(
+      metric,
+      levels = c(
+        "Total richness (S')",
+        "Core richness",
+        "Transient richness",
+        "Transient proportion"
+      )
+    )
+  )
+
+panel_A_legend_data <- data.frame(
+  year = factor(
+    c("2018", "2018", "2018", "2018"),
+    levels = c("2018", "2019", "2020")
+  ),
+  mean = c(NA, NA, NA, NA),
+  metric = factor(
+    c(
+      "Total richness (S')",
+      "Core richness",
+      "Transient richness",
+      "Transient proportion"
+    ),
+    levels = c(
+      "Total richness (S')",
+      "Core richness",
+      "Transient richness",
+      "Transient proportion"
+    )
+  )
+)
 
 panel_A <- ggplot(panel_A_data, aes(x = year, y = mean, color = metric, group = metric)) +
-  geom_line(linewidth = 0.8, na.rm = TRUE) +
-  geom_point(size = 2.2, na.rm = TRUE) +
-  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
-                width = 0.08, linewidth = 0.6, na.rm = TRUE) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    width = 0.08,
+    linewidth = 0.7
+  ) +
+  geom_line(
+    data = panel_A_legend_data,
+    aes(x = year, y = mean, color = metric, group = metric),
+    linewidth = 1.1,
+    show.legend = TRUE,
+    na.rm = TRUE
+  ) +
+  geom_point(
+    data = panel_A_legend_data,
+    aes(x = year, y = mean, color = metric),
+    size = 3,
+    show.legend = TRUE,
+    na.rm = TRUE
+  ) +
+  annotate(
+    "text",
+    x = 0.65,
+    y = 9.05,
+    label = "(A)",
+    family = "Times New Roman",
+    fontface = "bold",
+    size = 5
+  ) +
   scale_color_manual(
     values = metric_cols,
-    breaks = c("Total richness (S')", "Core richness",
-               "Transient richness", "Transient proportion"),
+    breaks = c(
+      "Total richness (S')",
+      "Core richness",
+      "Transient richness",
+      "Transient proportion"
+    ),
     drop = FALSE
   ) +
-  labs(x = NULL, y = "Richness", color = NULL) +
-  annotate("text", x = 0.88, y = 8.95, label = "(A)",
-           family = "Times New Roman", fontface = "bold", size = 5) +
-  theme_classic() +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        color = c("black", "#00A83A", "red", "#F4A300"),
+        linewidth = c(1.1, 1.1, 1.1, 1.1),
+        size = c(3, 3, 3, 3)
+      )
+    )
+  ) +
+  scale_y_continuous(
+    limits = c(5.85, 9.2),
+    breaks = c(6, 7, 8, 9),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  theme_fig3 +
   theme(
-    text = element_text(family = "Times New Roman"),
-    axis.text = element_text(size = 14, color = "black"),
-    axis.title = element_text(size = 16, face = "bold"),
-    legend.position = c(0.68, 0.37),
-    legend.background = element_blank(),
-    legend.key = element_blank(),
-    legend.text = element_text(size = 12)
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(
+      size = 16,
+      color = "black",
+      face = "bold",
+      vjust = 0.5,
+      margin = margin(r = 10)
+    ),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12, color = "black"),
+    legend.position = c(0.66, 0.28),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA)
   )
 
+panel_A
 
-## Panel B plot
-
+############################################################
+## 8. Panel B
+############################################################
 
 panel_B <- ggplot(panel_B_data, aes(x = year, y = mean, color = metric, group = metric)) +
-  geom_line(linewidth = 0.8) +
-  geom_point(size = 2.2) +
-  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
-                width = 0.08, linewidth = 0.6) +
-  scale_color_manual(values = metric_cols[c("Transient richness", "Transient proportion")]) +
-  scale_y_continuous(limits = c(0, 1), expand = c(0, 0.02)) +
-  labs(x = "Years", y = NULL, color = NULL) +
-  annotate("text", x = 0.88, y = 0.98, label = "(B)",
-           family = "Times New Roman", fontface = "bold", size = 5) +
-  theme_classic() +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    width = 0.08,
+    linewidth = 0.7
+  ) +
+  annotate(
+    "text",
+    x = 0.65,
+    y = 0.97,
+    label = "(B)",
+    family = "Times New Roman",
+    fontface = "bold",
+    size = 5
+  ) +
+  scale_color_manual(values = metric_cols, drop = FALSE) +
+  scale_y_continuous(
+    limits = c(-0.05, 1.05),
+    breaks = c(0, 0.25, 0.50, 0.75, 1.00),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Years",
+    y = NULL
+  ) +
+  theme_fig3 +
   theme(
-    text = element_text(family = "Times New Roman"),
-    axis.text = element_text(size = 14, color = "black"),
-    axis.title.x = element_text(size = 16, face = "bold"),
     legend.position = "none"
   )
 
 
-## Panel C plot
-
+############################################################
+## 9. Panel C
+############################################################
 
 panel_C <- ggplot(panel_C_data, aes(x = trt, y = mean, color = metric, group = metric)) +
-  geom_line(linewidth = 0.8) +
-  geom_point(size = 2.2) +
-  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
-                width = 0.08, linewidth = 0.6) +
-  scale_color_manual(values = metric_cols[c("Total richness (S')", "Core richness")]) +
-  labs(x = NULL, y = NULL, color = NULL) +
-  annotate("text", x = 0.78, y = 9.0, label = "(C)",
-           family = "Times New Roman", fontface = "bold", size = 5) +
-  theme_classic() +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    width = 0.08,
+    linewidth = 0.7
+  ) +
+  annotate(
+    "text",
+    x = 0.78,
+    y = 9.05,
+    label = "(C)",
+    family = "Times New Roman",
+    fontface = "bold",
+    size = 5
+  ) +
+  scale_color_manual(values = metric_cols, drop = FALSE) +
+  scale_y_continuous(
+    limits = c(5.85, 9.2),
+    breaks = c(6, 7, 8, 9),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  theme_fig3 +
   theme(
-    text = element_text(family = "Times New Roman"),
-    axis.text = element_text(size = 14, color = "black"),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
     legend.position = "none"
   )
 
 
-## Panel D plot
-
+############################################################
+## 10. Panel D
+############################################################
 
 panel_D <- ggplot(panel_D_data, aes(x = trt, y = mean, color = metric, group = metric)) +
-  geom_line(linewidth = 0.8) +
-  geom_point(size = 2.2) +
-  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
-                width = 0.08, linewidth = 0.6) +
-  scale_color_manual(values = metric_cols[c("Transient richness", "Transient proportion")]) +
-  scale_y_continuous(limits = c(0, 1), expand = c(0, 0.02)) +
-  labs(x = "Thinning", y = NULL, color = NULL) +
-  annotate("text", x = 0.78, y = 0.98, label = "(D)",
-           family = "Times New Roman", fontface = "bold", size = 5) +
-  theme_classic() +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    width = 0.08,
+    linewidth = 0.7
+  ) +
+  annotate(
+    "text",
+    x = 0.78,
+    y = 0.97,
+    label = "(D)",
+    family = "Times New Roman",
+    fontface = "bold",
+    size = 5
+  ) +
+  scale_color_manual(values = metric_cols, drop = FALSE) +
+  scale_y_continuous(
+    limits = c(-0.05, 1.05),
+    breaks = c(0, 0.25, 0.50, 0.75, 1.00),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Thinning",
+    y = NULL
+  ) +
+  theme_fig3 +
   theme(
-    text = element_text(family = "Times New Roman"),
-    axis.text = element_text(size = 14, color = "black"),
-    axis.title.x = element_text(size = 16, face = "bold"),
     legend.position = "none"
   )
 
 
-## Combine
+############################################################
+## 11. Combine Figure 3 correctly
+############################################################
 
+panel_A <- panel_A + labs(y = NULL)
+panel_B <- panel_B + labs(y = NULL)
+panel_C <- panel_C + labs(y = NULL)
+panel_D <- panel_D + labs(y = NULL)
+
+shared_y <- patchwork::wrap_elements(
+  full = grid::textGrob(
+    "Richness",
+    rot = 90,
+    gp = grid::gpar(
+      fontfamily = "Times New Roman",
+      fontsize = 16,
+      fontface = "bold"
+    )
+  )
+)
+
+design_fig3 <- "
+LAC
+LBD
+"
 
 fig3 <- patchwork::wrap_plots(
-  panel_A, panel_C,
-  panel_B, panel_D,
-  ncol = 2
-)
+  L = shared_y,
+  A = panel_A,
+  C = panel_C,
+  B = panel_B,
+  D = panel_D,
+  design = design_fig3,
+  widths = c(0.04, 1, 1),
+  heights = c(1, 1)
+) &
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
 
 fig3
 
+############################################################
+## 12. Save Figure 3
+############################################################
+
 ggsave(
-  filename = "Fig3_richness_components_updated.png",
+  filename = "Figure3_core_transient_richness.tiff",
   plot = fig3,
-  path = "C:/Users/Research Greenhouse/Desktop/paper goudie/goudie2/data",
+  dpi = 600,
   width = 10,
-  height = 7,
-  dpi = 600
+  height = 7.5,
+  units = "in",
+  compression = "lzw",
+  bg = "white"
 )
 
 
@@ -1093,39 +1542,83 @@ Anova(total_model, type = 2)
 
 
 ############################################################
-## 7. Plot: total biomass by year
+## Biomass figure cleaning + patchwork
+
+
+############################################################
+## 1. Clean factors and log variable
 ############################################################
 
-ggplot(year_means, aes(x = year, y = mean_biomass)) +
-  geom_col(fill = "grey30", width = 0.7) +
-  geom_errorbar(
-    aes(
-      ymin = mean_biomass - se_biomass,
-      ymax = mean_biomass + se_biomass
-    ),
-    width = 0.15,
-    color = "black"
-  ) +
-  scale_y_continuous(expand = c(0, 0), limits = c(0, 60)) +
-  labs(x = NULL, y = NULL) +
-  theme_classic(base_size = 14, base_family = "Times New Roman") +
-  theme(
-    axis.text.x = element_text(
-      color = "black",
-      size = 16,
-      family = "Times New Roman"
-    ),
-    axis.text.y = element_text(
-      color = "black",
-      size = 16,
-      family = "Times New Roman"
-    ),
-    legend.position = "none"
+biomass_richness <- biomass_richness %>%
+  mutate(
+    year = factor(year, levels = c("2019", "2020")),
+    trt  = factor(trt, levels = c("10 m", "15 m", "20 m", "Control")),
+    log_transient = log10(transient_richness + 1)
   )
 
+############################################################
+## 2. Summary tables for bar plots
+############################################################
+
+year_means <- biomass_richness %>%
+  group_by(year) %>%
+  summarise(
+    mean_biomass = mean(AGB_total, na.rm = TRUE),
+    se_biomass   = sd(AGB_total, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+trt_means <- biomass_richness %>%
+  group_by(trt) %>%
+  summarise(
+    mean_biomass = mean(AGB_total, na.rm = TRUE),
+    se_biomass   = sd(AGB_total, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
 
 ############################################################
-## 8. Plot: total biomass by treatment
+## 3. Tukey letters from total biomass model
+############################################################
+
+
+
+## Year letters
+year_letters <- multcomp::cld(
+  emmeans(total_model, ~ year),
+  Letters = letters,
+  adjust = "tukey"
+) %>%
+  as.data.frame() %>%
+  mutate(
+    year = factor(as.character(year), levels = c("2019", "2020")),
+    .group = gsub(" ", "", .group)
+  ) %>%
+  dplyr::select(year, .group)
+
+## Treatment letters
+trt_letters <- multcomp::cld(
+  emmeans(total_model, ~ trt),
+  Letters = letters,
+  adjust = "tukey"
+) %>%
+  as.data.frame() %>%
+  mutate(
+    trt = factor(as.character(trt), levels = c("10 m", "15 m", "20 m", "Control")),
+    .group = gsub(" ", "", .group)
+  ) %>%
+  dplyr::select(trt, .group)
+
+## Join letters to summary tables
+year_means <- year_means %>%
+  left_join(year_letters, by = "year") %>%
+  mutate(label_y = mean_biomass + se_biomass + 4)
+
+trt_means <- trt_means %>%
+  left_join(trt_letters, by = "trt") %>%
+  mutate(label_y = mean_biomass + se_biomass + 4)
+
+############################################################
+## 4. Treatment colours
 ############################################################
 
 trt_colors <- c(
@@ -1135,76 +1628,14 @@ trt_colors <- c(
   "Control" = "black"
 )
 
-ggplot(trt_means, aes(x = trt, y = mean_biomass, fill = trt)) +
-  geom_col(width = 0.7, color = "black") +
-  geom_errorbar(
-    aes(
-      ymin = mean_biomass - se_biomass,
-      ymax = mean_biomass + se_biomass
-    ),
-    width = 0.15,
-    color = "black"
-  ) +
-  scale_fill_manual(values = trt_colors) +
-  scale_y_continuous(
-    expand = c(0, 0),
-    limits = c(0, 65),
-    breaks = seq(0, 60, by = 10)
-  ) +
-  labs(x = NULL, y = NULL) +
-  theme_classic(base_size = 14, base_family = "Times New Roman") +
-  theme(
-    axis.text.x = element_text(
-      color = "black",
-      size = 16,
-      family = "Times New Roman"
-    ),
-    axis.text.y = element_text(
-      color = "black",
-      size = 16,
-      family = "Times New Roman"
-    ),
-    axis.title.x = element_blank(),
-    axis.title.y = element_blank(),
-    legend.position = "none"
-  )
-
-
 ############################################################
-## 9. Plot: biomass vs transient richness
+## 5. Common theme
 ############################################################
 
-trt_colors <- c(
-  "10 m" = "#6A6A6A",
-  "15 m" = "#B8860B",
-  "20 m" = "#377EB8"
-)
-
-y_max <- max(biomass_plot$AGB_total, pred_grid$upper, na.rm = TRUE)
-
-pp <- ggplot() +
-  geom_point(
-    data = biomass_plot,
-    aes(x = log_transient, y = AGB_total, colour = trt),
-    size = 2,
-    alpha = 0.8
-  ) +
-  geom_ribbon(
-    data = pred_grid,
-    aes(x = log_transient, ymin = lower, ymax = upper, fill = trt),
-    alpha = 0.18,
-    colour = NA
-  ) +
-  geom_line(
-    data = pred_grid,
-    aes(x = log_transient, y = pred, colour = trt),
-    linewidth = 1.1
-  ) +
-  scale_colour_manual(values = trt_colors) +
-  scale_fill_manual(values = trt_colors) +
-  labs(x = NULL, y = NULL) +
-  coord_cartesian(ylim = c(0, y_max * 1.05)) +
-  theme_classic(base_size = 14, base_family = "Times New Roman") +
+theme_biomass <- theme_classic(
+  base_size = 14,
+  base_family = "Times New Roman"
+) +
   theme(
     axis.line = element_line(color = "black", linewidth = 0.7),
     axis.text.x = element_text(
@@ -1217,46 +1648,221 @@ pp <- ggplot() +
       size = 16,
       family = "Times New Roman"
     ),
-    axis.title = element_blank(),
-    legend.position = "none"
+    axis.title.x = element_text(
+      color = "black",
+      size = 18,
+      family = "Times New Roman",
+      face = "bold"
+    ),
+    axis.title.y = element_text(
+      color = "black",
+      size = 18,
+      family = "Times New Roman",
+      face = "bold"
+    ),
+    legend.position = "none",
+    plot.margin = margin(8, 8, 8, 8)
   )
 
-pp
-
-ggsave(
-  filename = "transient_biomass_plot_clean1.tiff",
-  plot = pp,
-  path = "C:/Users/Research Greenhouse/Desktop/paper goudie/goudie2/data",
-  dpi = 600,
-  width = 7,
-  height = 5,
-  units = "in",
-  compression = "lzw"
-)
-
-
 ############################################################
-## 10. R2 per treatment curve
+## 6. Panel A: biomass by year
 ############################################################
 
-df_10 <- subset(biomass_richness, trt == "10 m")
-df_15 <- subset(biomass_richness, trt == "15 m")
-df_20 <- subset(biomass_richness, trt == "20 m")
+pA <- ggplot(year_means, aes(x = year, y = mean_biomass)) +
+  geom_col(
+    fill = "grey30",
+    width = 0.7,
+    color = "black"
+  ) +
+  geom_errorbar(
+    aes(
+      ymin = mean_biomass - se_biomass,
+      ymax = mean_biomass + se_biomass
+    ),
+    width = 0.15,
+    color = "black",
+    linewidth = 0.6
+  ) +
+  geom_text(
+    aes(y = label_y, label = .group),
+    size = 6,
+    family = "Times New Roman"
+  ) +
+  annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = "(A)",
+    hjust = -0.45,
+    vjust = 1.35,
+    size = 6,
+    fontface = "bold",
+    family = "Times New Roman"
+  ) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    limits = c(0, 60),
+    breaks = seq(0, 60, by = 10)
+  ) +
+  labs(
+    x = "Years",
+    y = NULL
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_biomass
 
-m10 <- lm(AGB_total ~ log_transient, data = df_10)
-m15 <- lm(AGB_total ~ log_transient, data = df_15)
-m20 <- lm(AGB_total ~ log_transient, data = df_20)
+############################################################
+## 7. Panel B: biomass by treatment
+############################################################
+
+pB <- ggplot(trt_means, aes(x = trt, y = mean_biomass, fill = trt)) +
+  geom_col(
+    width = 0.7,
+    color = "black"
+  ) +
+  geom_errorbar(
+    aes(
+      ymin = mean_biomass - se_biomass,
+      ymax = mean_biomass + se_biomass
+    ),
+    width = 0.15,
+    color = "black",
+    linewidth = 0.6
+  ) +
+  geom_text(
+    aes(y = label_y, label = .group),
+    size = 6,
+    family = "Times New Roman"
+  ) +
+  annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = "(B)",
+    hjust = -0.45,
+    vjust = 1.35,
+    size = 6,
+    fontface = "bold",
+    family = "Times New Roman"
+  ) +
+  scale_fill_manual(values = trt_colors) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    limits = c(0, 65),
+    breaks = seq(0, 60, by = 10)
+  ) +
+  labs(
+    x = "Strips-thinning",
+    y = "Biomass (g)"
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_biomass
+
+############################################################
+## 8. Panel C: biomass vs transient richness
+############################################################
+
+biomass_plot <- biomass_richness %>%
+  filter(trt %in% c("10 m", "15 m", "20 m")) %>%
+  droplevels()
+
+############################################################
+## 9. R2 values per treatment
+############################################################
+
+m10 <- lm(AGB_total ~ log_transient, data = subset(biomass_plot, trt == "10 m"))
+m15 <- lm(AGB_total ~ log_transient, data = subset(biomass_plot, trt == "15 m"))
+m20 <- lm(AGB_total ~ log_transient, data = subset(biomass_plot, trt == "20 m"))
 
 r2_10 <- summary(m10)$r.squared
 r2_15 <- summary(m15)$r.squared
 r2_20 <- summary(m20)$r.squared
 
-r2_table <- data.frame(
-  Treatment = c("10 m", "15 m", "20 m"),
-  R2 = c(r2_10, r2_15, r2_20)
+r2_labels <- data.frame(
+  trt = factor(c("10 m", "15 m", "20 m"), levels = c("10 m", "15 m", "20 m")),
+  x = c(0.32, 0.35, 0.52),
+  y = c(8, 30, 46),
+  label = c(
+    paste0("R² = ", round(r2_10, 2)),
+    paste0("R² = ", round(r2_15, 2)),
+    paste0("R² = ", round(r2_20, 2))
+  )
 )
 
-r2_table
+pC <- ggplot(
+  biomass_plot,
+  aes(x = log_transient, y = AGB_total, colour = trt, fill = trt)
+) +
+  geom_point(
+    size = 2,
+    alpha = 0.8
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    linewidth = 1.1,
+    alpha = 0.18
+  ) +
+  geom_text(
+    data = r2_labels,
+    aes(x = x, y = y, label = label, colour = trt),
+    inherit.aes = FALSE,
+    size = 5,
+    family = "Times New Roman",
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = "(C)",
+    hjust = -0.45,
+    vjust = 1.35,
+    size = 6,
+    fontface = "bold",
+    family = "Times New Roman"
+  ) +
+  scale_colour_manual(values = trt_colors) +
+  scale_fill_manual(values = trt_colors) +
+  scale_y_continuous(
+    expand = c(0, 0),
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 25)
+  ) +
+  labs(
+    x = "Log 10 Transient richness",
+    y = NULL
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_biomass
+
+############################################################
+## 10. Patchwork: vertical structure like manuscript
+############################################################
+
+fig5 <- pA / pB / pC +
+  plot_layout(heights = c(1, 1, 1.25))
+
+fig5
+
+############################################################
+## 11. Save final figure
+############################################################
+
+ggsave(
+  filename = "C:/GitHub/TRU_Strip_thinning_community/Figure_4_AGB_biomass_final.tiff",
+  plot = fig5,
+  dpi = 600,
+  width = 7,
+  height = 10,
+  units = "in",
+  compression = "lzw"
+)
+
+
+
+
 
 ############################################################
 ##  C:N ratio 
