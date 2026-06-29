@@ -11,6 +11,7 @@ library(glmmTMB)
 library(DHARMa)
 library(emmeans)
 library(multcomp)
+library(janitor)
 # -----------------------------
 # 1. Clean column names
 # -----------------------------
